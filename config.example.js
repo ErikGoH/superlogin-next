@@ -163,7 +163,9 @@ const exampleConfig = {
         // Array containing name of the design doc files (omitting .js extension), in the directory configured below
         designDocs: ['mydesign'],
         // these permissions only work with the Cloudant API
-        permissions: ['_reader', '_replicator']
+        permissions: ['_reader', '_replicator'],
+        // set the separator that is appended with the user_id to the private dbs
+        appendSeparator: '$',
       },
       test: {
         designDocs: ['test'],

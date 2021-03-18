@@ -134,7 +134,8 @@ export class DBAuth {
     type?: string,
     permissions?: any,
     adminRoles?: string[],
-    memberRoles?: string[]
+    memberRoles?: string[],
+    appendSeparator?: string,
   ): Promise<string> {
     const promises = [];
     adminRoles = adminRoles || [];
@@ -146,7 +147,7 @@ export class DBAuth {
 
     // new in 2.0: use uuid instead of username
     const finalDBName =
-      type === 'shared' ? dbName : prefix + dbName + '$' + userDoc._id;
+      type === 'shared' ? dbName : prefix + dbName + appendSeparator + userDoc._id;
     await this.createDB(finalDBName);
     const newDB = this.#server.db.use(finalDBName);
     await this.#adapter.initSecurity(newDB, adminRoles, memberRoles);
@@ -293,6 +294,7 @@ export class DBAuth {
       dbConfig.permissions = dbConfigRef.permissions || [];
       dbConfig.designDocs = dbConfigRef.designDocs || [];
       dbConfig.type = type || dbConfigRef.type || 'private';
+      dbConfig.appendSeparator = dbConfigRef.appendSeparator || '$';
       const dbAdminRoles = dbConfigRef.adminRoles;
       const dbMemberRoles = dbConfigRef.memberRoles;
       if (dbAdminRoles && dbAdminRoles instanceof Array) {
