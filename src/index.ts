@@ -105,4 +105,4 @@ export class SuperLogin extends User {
   }
 }
 
-module.exports = SuperLogin;
+export default SuperLogin;
