@@ -1,15 +1,16 @@
 'use strict';
-import {
-  arrayUnion,
-  EMAIL_REGEXP,
-  getExpiredSessions,
-  getSessions,
-  hashToken,
-  hyphenizeUUID,
-  removeHyphens,
-  URLSafeUUID,
-  USER_REGEXP
-} from './util';
+import Model, { Sofa } from '@sl-nx/sofa-model';
+import merge from 'deepmerge';
+import { EventEmitter } from 'events';
+import { Request } from 'express';
+import { DocumentScope } from 'nano';
+import url from 'url';
+import { v4 as uuidv4 } from 'uuid';
+import { DBAuth } from './dbauth';
+import { Hashing } from './hashing';
+import { Mailer } from './mailer';
+import { Session } from './session';
+import { Config } from './types/config';
 import {
   CouchDbAuthDoc,
   HashResult,
@@ -22,19 +23,18 @@ import {
   SlUserDoc,
   SlUserNew
 } from './types/typings';
-import Model, { Sofa } from '@sl-nx/sofa-model';
-import { Config } from './types/config';
-import { DBAuth } from './dbauth';
 import { DbManager } from './user/DbManager';
-import { DocumentScope } from 'nano';
-import { EventEmitter } from 'events';
-import { Hashing } from './hashing';
-import { Mailer } from './mailer';
-import merge from 'deepmerge';
-import { Request } from 'express';
-import { Session } from './session';
-import url from 'url';
-import { v4 as uuidv4 } from 'uuid';
+import {
+  arrayUnion,
+  EMAIL_REGEXP,
+  getExpiredSessions,
+  getSessions,
+  hashToken,
+  hyphenizeUUID,
+  removeHyphens,
+  URLSafeUUID,
+  USER_REGEXP
+} from './util';
 
 enum Cleanup {
   'expired' = 'expired',
@@ -69,7 +69,7 @@ export class User {
     protected userDB: DocumentScope<SlUserDoc>,
     couchAuthDB: DocumentScope<CouchDbAuthDoc>,
     protected mailer: Mailer,
-    protected emitter: EventEmitter
+    public emitter: EventEmitter
   ) {
     this.dbAuth = new DBAuth(config, userDB, couchAuthDB);
     this.onCreateActions = [];
@@ -77,22 +77,7 @@ export class User {
     this.hasher = new Hashing(config);
     this.session = new Session(this.hasher);
     this.userDbManager = new DbManager(userDB, config);
-
-    // Token valid for 24 hours by default
-    // Session token life
-    this.passwordConstraints = {
-      presence: true,
-      length: {
-        minimum: 6,
-        message: 'must be at least 6 characters'
-      },
-      matches: 'confirmPassword'
-    };
-    const additionalConstraints = config.local.passwordConstraints;
-    this.passwordConstraints = merge(
-      this.passwordConstraints,
-      additionalConstraints ? additionalConstraints : {}
-    );
+    this.passwordConstraints = config.local.passwordConstraints;
 
     // the validation functions are public
     this.validateUsername = async function (username: string) {
@@ -135,7 +120,6 @@ export class User {
       }
     };
 
-    // SofaModelOptions
     const userModel: Sofa.AsyncOptions = {
       async: true,
       whitelist: ['name', 'username', 'email', 'password', 'confirmPassword'],
@@ -264,8 +248,8 @@ export class User {
    * retrieves by email (default) or username or uuid if the config options are
    * set. Rejects if no valid format.
    */
-  getUser(login: string): Promise<SlUserDoc | null> {
-    return this.userDbManager.getUser(login);
+  getUser(login: string, allowUUID = false): Promise<SlUserDoc | null> {
+    return this.userDbManager.getUser(login, allowUUID);
   }
 
   async handleEmailExists(email: string): Promise<void> {
@@ -276,7 +260,7 @@ export class User {
     this.emitter.emit('signup-attempt', existingUser, 'local');
   }
 
-  async createUser(form, req = undefined): Promise<void | SlUserDoc> {
+  async createUser(form, req?): Promise<void | SlUserDoc> {
     req = req || {};
     let finalUserModel = this.userModel;
     const newUserModel = this.config.userModel;
@@ -297,10 +281,12 @@ export class User {
     }
     const UserModel = Model(finalUserModel);
     const user = new UserModel(form);
-    let newUser: Partial<SlUserNew>;
+    let newUser: Partial<SlUserNew> = {};
+    let hasError = false;
     try {
       newUser = await user.process();
     } catch (err) {
+      hasError = true;
       if (
         err.email &&
         this.config.local.emailUsername &&
@@ -311,17 +297,35 @@ export class User {
         );
         if (inUseIdx >= 0) {
           err.email.splice(inUseIdx, 1);
+          if (err.email.length === 0) {
+            this.handleEmailExists(form.email);
+          }
         }
-        if (err.email.length === 0 && Object.keys(err).length === 1) {
-          return this.handleEmailExists(form.email);
+      } else {
+        throw {
+          error: 'Validation failed',
+          validationErrors: err,
+          status: 400
+        };
+      }
+    }
+
+    return new Promise(async (resolve, reject) => {
+      newUser = await this.prepareNewUser(newUser);
+      if (hasError || !this.config.security.loginOnRegistration) {
+        resolve(hasError ? undefined : (newUser as SlUserDoc));
+      }
+      if (!hasError) {
+        const finalUser = await this.insertNewUserDocument(newUser, req);
+        this.emitter.emit('signup', finalUser, 'local');
+        if (this.config.security.loginOnRegistration) {
+          resolve(finalUser);
         }
       }
-      throw {
-        error: 'Validation failed',
-        validationErrors: err,
-        status: 400
-      };
-    }
+    });
+  }
+
+  private async prepareNewUser(newUser: Partial<SlUserNew>) {
     const uid = uuidv4();
     // todo: remove, this is just for backwards compat...
     if (this.config.local.sendNameAndUUID) {
@@ -338,14 +342,23 @@ export class User {
       };
       delete newUser.email;
     }
-    newUser.local = await this.hashPassword(newUser.password);
+    newUser.local = await this.hashPassword(newUser.password ?? URLSafeUUID());
     delete newUser.password;
     delete newUser.confirmPassword;
     newUser.signUp = {
       provider: 'local',
       timestamp: new Date().toISOString()
     };
+    return newUser;
+  }
+
+  private async insertNewUserDocument(newUser: Partial<SlUserNew>, req?) {
     newUser = await this.addUserDBs(newUser as SlUserDoc);
+    newUser = this.userDbManager.logActivity(
+      'signup',
+      'local',
+      newUser as SlUserDoc
+    );
     const finalNewUser = await this.processTransformations(
       this.onCreateActions,
       newUser as SlUserDoc,
@@ -357,10 +370,12 @@ export class User {
       await this.mailer.sendEmail(
         'confirmEmail',
         newUser.unverifiedEmail.email,
-        { req: req, user: newUser }
+        {
+          req: req,
+          user: newUser
+        }
       );
     }
-    this.emitter.emit('signup', newUser, 'local');
     return newUser as SlUserDoc;
   }
 
@@ -371,7 +386,7 @@ export class User {
    * @param {any} auth credentials supplied by the provider
    * @param {any} profile the profile supplied by the provider
    */
-  async socialAuth(provider: string, auth, profile): Promise<SlUserDoc> {
+  async createUserSocial(provider: string, auth, profile): Promise<SlUserDoc> {
     let user: Partial<SlUserDoc>;
     let newAccount = false;
     // This used to be consumed by `.nodeify` from Bluebird. I hope `callbackify` works just as well...
@@ -425,36 +440,39 @@ export class User {
       user._id = removeHyphens(uuidv4());
       user = await this.addUserDBs(user as SlUserDoc);
     }
-    const finalUser = await this.processTransformations(
+    let finalUser = await this.processTransformations(
       newAccount ? this.onCreateActions : this.onLinkActions,
       user as SlUserDoc,
       provider
     );
+    const action = newAccount ? 'signup' : 'create-social';
+    finalUser = this.userDbManager.logActivity(action, provider, finalUser);
     await this.userDB.insert(finalUser);
-    const action = newAccount ? 'signup' : 'link-social';
     this.emitter.emit(action, user, provider);
     return user as SlUserDoc;
   }
 
-  async linkSocial(
+  async linkUserSocial(
     login: string,
     provider: string,
     auth,
     profile
   ): Promise<SlUserDoc> {
-    const userDoc = await this.userDbManager.initLinkSocial(
+    let userDoc = await this.userDbManager.initLinkSocial(
       login,
       provider,
       auth,
       profile
     );
-    const finalUser = await this.processTransformations(
+    userDoc = await this.processTransformations(
       this.onLinkActions,
       userDoc,
       provider
     );
-    await this.userDB.insert(finalUser);
-    return finalUser;
+    userDoc = this.userDbManager.logActivity('link-social', provider, userDoc);
+    await this.userDB.insert(userDoc);
+    this.emitter.emit('link-social', userDoc, provider);
+    return userDoc;
   }
 
   /**
@@ -469,7 +487,6 @@ export class User {
 
   /**
    * Creates a new session for a user. provider is the name of the provider. (eg. 'local', 'facebook', twitter.)
-   * req is used to log the IP if provided.
    */
   async createSession(
     login: string,
@@ -480,51 +497,46 @@ export class User {
       ? await this.userDbManager.getUserByUUID(login)
       : await this.getUser(login);
     if (!user) {
-      console.log('createSession - could not retrieve: ', login);
+      console.warn('createSession - could not retrieve: ', login);
       throw { error: 'Bad Request', status: 400 };
     }
     const user_uid = user._id;
-    const token = await this.generateSession(user_uid, user.roles);
+    const token = this.generateSession(user_uid, user.roles, provider);
     const password = token.password;
-    const newToken = token;
-    newToken.provider = provider;
+    token.provider = provider;
     await this.dbAuth.storeKey(
       user.key,
-      newToken.key,
+      token.key,
       password,
-      newToken.expires,
+      token.expires,
       user.roles,
       provider
     );
     // authorize the new session across all dbs
     if (user.personalDBs) {
-      await this.dbAuth.authorizeUserSessions(
-        user_uid,
-        user.personalDBs,
-        newToken.key,
-        user.roles
-      );
+      await this.dbAuth.authorizeUserSessions(user.personalDBs, token.key);
     }
     if (!user.session) {
       user.session = {};
     }
     const newSession: Partial<SlLoginSession> = {
-      issued: newToken.issued,
-      expires: newToken.expires,
+      issued: token.issued,
+      expires: token.expires,
       provider: provider
     };
-    user.session[newToken.key] = newSession as SessionObj;
+    user.session[token.key] = newSession as SessionObj;
     // Clear any failed login attempts
     if (provider === 'local') {
       if (!user.local) user.local = {};
       delete user.local.failedLoginAttempts;
       delete user.local.lockedUntil;
     }
+    const userDoc = this.userDbManager.logActivity('login', provider, user);
     // Clean out expired sessions on login
-    const finalUser = await this.logoutUserSessions(user, Cleanup.expired);
+    const finalUser = await this.logoutUserSessions(userDoc, Cleanup.expired);
     user = finalUser;
     await this.userDB.insert(finalUser);
-    newSession.token = newToken.key;
+    newSession.token = token.key;
     newSession.password = password;
     newSession.user_id = user.key;
     newSession.roles = user.roles;
@@ -571,12 +583,13 @@ export class User {
    * - handle error if invalid state occurs that doc is not present.
    */
   async refreshSession(key: string): Promise<SlRefreshSession> {
-    const userDoc = await this.userDbManager.findUserDocBySession(key);
+    let userDoc = await this.userDbManager.findUserDocBySession(key);
     const newExpiration = Date.now() + this.config.security.sessionLife * 1000;
     userDoc.session[key].expires = newExpiration;
     // Clean out expired sessions on refresh
-    const finalUser = await this.logoutUserSessions(userDoc, Cleanup.expired);
-    await this.userDB.insert(finalUser);
+    userDoc = await this.logoutUserSessions(userDoc, Cleanup.expired);
+    userDoc = this.userDbManager.logActivity('refresh', key, userDoc);
+    await this.userDB.insert(userDoc);
     await this.dbAuth.extendKey(key, newExpiration);
 
     const newSession: SlRefreshSession = {
@@ -638,6 +651,7 @@ export class User {
     if (user.unverifiedEmail) {
       user = await this.markEmailAsVerified(user);
     }
+    user = this.userDbManager.logActivity('password-reset', 'local', user);
     await this.userDB.insert(user);
     await this.sendModifiedPasswordEmail(user, req);
     this.emitter.emit('password-reset', user);
@@ -742,7 +756,12 @@ export class User {
       userDoc.providers.push('local');
     }
     userDoc.local = { ...userDoc.local, ...hash };
-    await this.userDB.insert(userDoc);
+    const finalUser = this.userDbManager.logActivity(
+      'password-change',
+      'local',
+      userDoc
+    );
+    await this.userDB.insert(finalUser);
     await this.sendModifiedPasswordEmail(userDoc, req);
     this.emitter.emit('password-change', userDoc);
   }
@@ -757,7 +776,10 @@ export class User {
     }
   }
 
-  async forgotPassword(email: string, req: Partial<Request>): Promise<void> {
+  public async forgotPassword(
+    email: string,
+    req: Partial<Request>
+  ): Promise<void> {
     if (!email || !email.match(EMAIL_REGEXP)) {
       return Promise.reject({ error: 'invalid email', status: 400 });
     }
@@ -766,35 +788,44 @@ export class User {
       const user = await this.userDbManager.getUserBy('email', email);
       if (!user) {
         throw {
-          error: 'User not found',
+          error: 'User not found', // not sent as response.
           status: 404
         };
       }
-      let token = URLSafeUUID();
-      if (this.config.local.tokenLengthOnReset) {
-        token = token.substring(0, this.config.local.tokenLengthOnReset);
-      }
-      const tokenHash = hashToken(token);
-      user.forgotPassword = {
-        token: tokenHash, // Store secure hashed token
-        issued: Date.now(),
-        expires: Date.now() + this.config.security.tokenLife * 1000
-      };
-      await this.userDB.insert(user);
-      await this.mailer.sendEmail(
-        'forgotPassword',
-        user.email || user.unverifiedEmail.email,
-        { user: user, req: req, token: token }
-      );
-      this.emitter.emit('forgot-password', user);
+      this.completeForgotPassRequest(user, req).catch(err => {
+        this.emitter.emit('forgot-password-attempt', email);
+        console.warn('forgot-password: failed for ', user._id, ' with: ', err);
+      });
     } catch (err) {
       this.emitter.emit('forgot-password-attempt', email);
-      if (err.status === 404) {
-        return Promise.resolve();
-      } else {
+      if (err.status !== 404) {
         return Promise.reject(err);
       }
     }
+  }
+
+  private async completeForgotPassRequest(
+    user: SlUserDoc,
+    req: Partial<Request>
+  ) {
+    let token = URLSafeUUID();
+    if (this.config.local.tokenLengthOnReset) {
+      token = token.substring(0, this.config.local.tokenLengthOnReset);
+    }
+    const tokenHash = hashToken(token);
+    user.forgotPassword = {
+      token: tokenHash, // Store secure hashed token
+      issued: Date.now(),
+      expires: Date.now() + this.config.security.tokenLife * 1000
+    };
+    user = this.userDbManager.logActivity('forgot-password', 'local', user);
+    await this.userDB.insert(user);
+    await this.mailer.sendEmail(
+      'forgotPassword',
+      user.email || user.unverifiedEmail.email,
+      { user: user, req: req, token: token }
+    );
+    this.emitter.emit('forgot-password', user);
   }
 
   verifyEmail(token: string) {
@@ -817,27 +848,14 @@ export class User {
     userDoc.email = userDoc.unverifiedEmail.email;
     delete userDoc.unverifiedEmail;
     this.emitter.emit('email-verified', userDoc);
-    return userDoc;
+    return this.userDbManager.logActivity('email-verified', 'local', userDoc);
   }
 
-  async changeEmail(login: string, newEmail: string, req: Partial<SlRequest>) {
-    req = req || {};
-    if (!req.user) {
-      req.user = { provider: 'local' };
-    }
-    newEmail = newEmail.toLowerCase().trim(); // todo: use Sofa Model, merge with config!
-    const emailError = await this.validateEmail(newEmail);
-    if (emailError) {
-      if (
-        this.config.local.requireEmailConfirm &&
-        emailError === ValidErr.exists
-      ) {
-        this.emitter.emit('illegal-email-change', login, newEmail);
-        return;
-      } else {
-        throw emailError;
-      }
-    }
+  private async completeEmailChange(
+    login: string,
+    newEmail: string,
+    req: Partial<SlRequest>
+  ) {
     const user = await this.getUser(login);
     if (!user) {
       throw { error: 'Bad Request', status: 400 }; // should exist.
@@ -857,8 +875,38 @@ export class User {
     } else {
       user.email = newEmail;
     }
+    const finalUser = this.userDbManager.logActivity(
+      'email-changed',
+      req.user.provider,
+      user
+    );
+    await this.userDB.insert(finalUser);
     this.emitter.emit('email-changed', user);
-    return this.userDB.insert(user);
+  }
+
+  public async changeEmail(
+    login: string,
+    newEmail: string,
+    req: Partial<SlRequest>
+  ) {
+    req = req || {};
+    if (!req.user) {
+      req.user = { provider: 'local' };
+    }
+    newEmail = newEmail.toLowerCase().trim();
+    const emailError = await this.validateEmail(newEmail);
+    if (emailError) {
+      this.emitter.emit('email-change-attempt', login, newEmail);
+      if (
+        this.config.local.requireEmailConfirm &&
+        emailError === ValidErr.exists
+      ) {
+        return;
+      } else {
+        throw emailError;
+      }
+    }
+    this.completeEmailChange(login, newEmail, req);
   }
 
   async removeUserDB(
@@ -894,15 +942,16 @@ export class User {
   }
 
   /**
-   * Logs out a user either by his provided login information (uuid, email or
-   * username) or his session_id
+   * Completely logs out a user either by his provided login information (uuid,
+   * email or username) or his session_id
    */
-  async logoutUser(login: string, session_id: string) {
+  async logoutAll(login: string, session_id: string) {
     let user: SlUserDoc;
     if (login) {
       user = await this.getUser(login);
     } else if (session_id) {
       user = await this.userDbManager.findUserDocBySession(session_id);
+      login = session_id;
     }
     if (!user) {
       return Promise.reject({
@@ -911,7 +960,7 @@ export class User {
       });
     }
     await this.logoutUserSessions(user, Cleanup.all);
-    this.emitter.emit('logout', user.key);
+    user = this.userDbManager.logActivity('logout-all', login, user);
     this.emitter.emit('logout-all', user.key);
     return this.userDB.insert(user);
   }
@@ -951,9 +1000,11 @@ export class User {
       if (user.session) {
         endSessions = Object.keys(user.session).length;
       }
+
       this.emitter.emit('logout', user.key);
       if (startSessions !== endSessions) {
         // 3) update the sl-doc
+        user = this.userDbManager.logActivity('logout', session_id, user);
         return this.userDB.insert(user);
       } else {
         return false;
@@ -1027,25 +1078,26 @@ export class User {
     return userDoc;
   }
 
-  async removeUser(login: string, destroyDBs) {
+  async removeUser(login: string, destroyDBs = false, reason?: string) {
     const promises = [];
-    const userDoc = await this.getUser(login);
-    const user = await this.logoutUserSessions(userDoc, Cleanup.all);
-    if (destroyDBs !== true || !user.personalDBs) {
-      return Promise.resolve();
+    let user = await this.getUser(login, true);
+    user = await this.logoutUserSessions(user, Cleanup.all);
+    if (destroyDBs && user.personalDBs) {
+      Object.keys(user.personalDBs).forEach(userdb => {
+        if (user.personalDBs[userdb].type === 'private') {
+          promises.push(this.dbAuth.removeDB(userdb));
+        }
+      });
+      await Promise.all(promises);
     }
-    Object.keys(user.personalDBs).forEach(userdb => {
-      if (user.personalDBs[userdb].type === 'private') {
-        promises.push(this.dbAuth.removeDB(userdb));
-      }
-    });
-    await Promise.all(promises);
-    return this.userDB.destroy(user._id, user._rev);
+
+    await this.userDB.destroy(user._id, user._rev);
+    this.emitter.emit('user-deleted', user, reason);
   }
 
   /**
    * Confirms the user:password that has been passed as Bearer Token
-   * Todo: maybe just look in superlogin-users or try to access DB?
+   * Todo: Should ensure that sessions aren't discarded on CouchDB error!
    */
   async confirmSession(key: string, password: string) {
     try {
@@ -1059,40 +1111,50 @@ export class User {
         delete token.type;
         delete token._rev;
         delete token.password_scheme;
-        return this.session.confirmToken(token, password);
+        return await this.session.confirmToken(token, password);
       } else {
         this.dbAuth.removeKeys(key);
       }
-    } catch {}
+    } catch {
+      await this.session.confirmToken({}, password);
+    }
     throw Session.invalidMsg;
   }
 
-  generateSession(user_uid: string, roles: string[]) {
-    return this.dbAuth.getApiKey().then(key => {
-      const now = Date.now();
-      return Promise.resolve({
-        _id: user_uid,
-        key: key.key,
-        password: key.password,
-        issued: now,
-        expires: now + this.config.security.sessionLife * 1000,
-        roles: roles
-      });
-    });
+  generateSession(user_uid: string, roles: string[], provider: string) {
+    const key = this.dbAuth.getApiKey();
+    const now = Date.now();
+    return {
+      ...key,
+      _id: user_uid,
+      issued: now,
+      expires: now + this.config.security.sessionLife * 1000,
+      roles,
+      provider
+    };
   }
 
-  /** todo: why this method?? Also existed in Colin's version. */
+  /**
+   * Associates a new database with the user's account. Will also authenticate
+   * all existing sessions with the new database. If the optional fields are not
+   * specified, they will be taken from `userDBs.model.{dbName}` or
+   * `userDBs.model._default` in your config.
+   * @param login  the `key`, `email` or `_id` (user_uid) of the user
+   * @param dbName the name of the database. For a shared db, this is the actual
+   *               path. For a private db userDBs.privatePrefix will be prepended,
+   *               and ${user_uid} appended.
+   * @param type 'private' (default) or 'shared'
+   * @param designDocs the name of the designDoc (if any) that will be seeded.
+   */
   addUserDB(
-    login: string, // todo: either pass uid or use find here
+    login: string,
     dbName: string,
-    type: string,
-    designDocs?,
-    permissions?: string[]
+    type: 'private' | 'shared' = 'private',
+    designDocs?
   ) {
     let userDoc: SlUserDoc;
-    const dbConfig = this.dbAuth.getDBConfig(dbName, type || 'private');
+    const dbConfig = this.dbAuth.getDBConfig(dbName, type);
     dbConfig.designDocs = designDocs || dbConfig.designDocs || '';
-    dbConfig.permissions = permissions || dbConfig.permissions;
     return this.getUser(login)
       .then(result => {
         if (!result) {
@@ -1104,7 +1166,6 @@ export class User {
           dbName,
           dbConfig.designDocs,
           dbConfig.type,
-          dbConfig.permissions,
           dbConfig.adminRoles,
           dbConfig.memberRoles,
           dbConfig.appendSeparator
@@ -1115,10 +1176,6 @@ export class User {
           userDoc.personalDBs = {};
         }
         delete dbConfig.designDocs;
-        // If permissions is specified explicitly it will be saved, otherwise will be taken from defaults every session
-        if (!permissions) {
-          delete dbConfig.permissions;
-        }
         delete dbConfig.adminRoles;
         delete dbConfig.memberRoles;
         userDoc.personalDBs[finalDBName] = dbConfig;
@@ -1145,13 +1202,11 @@ export class User {
               userDBName,
               dbConfig.designDocs,
               type,
-              dbConfig.permissions,
               dbConfig.adminRoles,
               dbConfig.memberRoles,
               dbConfig.appendSeparator
             )
             .then(finalDBName => {
-              delete dbConfig.permissions;
               delete dbConfig.adminRoles;
               delete dbConfig.memberRoles;
               delete dbConfig.designDocs;

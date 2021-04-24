@@ -1,20 +1,20 @@
 'use strict';
-import { addProvidersToDesignDoc, loadCouchServer } from './util';
-import { CouchDbAuthDoc, SlUserDoc } from './types/typings';
-import { DocumentScope, ServerScope as NanoServer } from 'nano';
-import express, { Router } from 'express';
-import { Authenticator } from 'passport';
 import { ServerScope as CloudantServer } from '@cloudant/cloudant';
-import { Config } from './types/config';
-import { ConfigHelper } from './config/configure';
 import events from 'events';
-import loadRoutes from './routes';
+import express, { Router } from 'express';
+import { DocumentScope, ServerScope as NanoServer } from 'nano';
+import { Authenticator } from 'passport';
+import { ConfigHelper } from './config/configure';
+import seed from './design/seed';
 import localConfig from './local';
 import { Mailer } from './mailer';
 import { Middleware } from './middleware';
 import { OAuth } from './oauth';
-import seed from './design/seed';
+import loadRoutes from './routes';
+import { Config } from './types/config';
+import { CouchDbAuthDoc, SlUserDoc } from './types/typings';
 import { User } from './user';
+import { addProvidersToDesignDoc, loadCouchServer } from './util';
 
 export class SuperLogin extends User {
   router: Router;
@@ -49,7 +49,7 @@ export class SuperLogin extends User {
     let server: CloudantServer | NanoServer;
     if (
       (!userDB && config.dbServer.userDB) ||
-      (!couchAuthDB && config.dbServer.couchAuthDB && !config.dbServer.cloudant)
+      (!couchAuthDB && config.dbServer.couchAuthDB)
     ) {
       server = loadCouchServer(config);
     }
@@ -57,11 +57,7 @@ export class SuperLogin extends User {
     if (!userDB && config.dbServer.userDB) {
       userDB = server.use(config.dbServer.userDB);
     }
-    if (
-      !couchAuthDB &&
-      config.dbServer.couchAuthDB &&
-      !config.dbServer.cloudant
-    ) {
+    if (!couchAuthDB && config.dbServer.couchAuthDB) {
       couchAuthDB = server.use(config.dbServer.couchAuthDB);
     }
     if (!userDB || typeof userDB !== 'object') {
@@ -97,11 +93,6 @@ export class SuperLogin extends User {
     this.requireRole = middleware.requireRole.bind(middleware);
     this.requireAnyRole = middleware.requireAnyRole.bind(middleware);
     this.requireAllRoles = middleware.requireAllRoles.bind(middleware);
-
-    // Inherit emitter
-    for (const key in emitter) {
-      this[key] = emitter[key];
-    }
   }
 }
 

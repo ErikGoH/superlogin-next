@@ -3,21 +3,28 @@
 ![Known Vulnerabilities](https://dev.snyk.io/test/github/sl-nx/superlogin/badge.svg)
 ![Build Status](https://github.com/sl-nx/superlogin-next/workflows/Build/badge.svg?branch=master)
 
-This is an updated fork of SuperLogin, re-written in TypeScript and developed with Node 12 & CouchDB 3 / Cloudant.
+This is a heavily modified SuperLogin, re-written in TypeScript and developed with Node 12 & CouchDB 3 / Cloudant.
 
-If you've just plugged SuperLogin into your Express Server, it should be backwards compatible - unless you've been
-passing a PouchDB (it now uses [nano](https://github.com/apache/couchdb-nano) or [cloudant](https://www.npmjs.com/package/@cloudant/cloudant) for IAM compatibility instead). There are a few new configuration options and some changes under the hood, for details see the [Changelog](https://github.com/sl-nx/superlogin/blob/master/CHANGELOG.md).
+If you've just plugged SuperLogin into your Express Server, the current `master` branch or `0.X` release should be mostly backwards compatible. There are a few new configuration options and some changes under the hood, for details see the [Changelog](https://github.com/sl-nx/superlogin/blob/master/CHANGELOG.md).
 
-[Future changes](https://github.com/sl-nx/superlogin-next/projects/1) will mainly affect improved security (_including modified/ new configuration defaults_) and compatibility with Cloudant. Be sure to always check the [Changelog](https://github.com/sl-nx/superlogin/blob/master/CHANGELOG.md) also on minor releases before this reaches 1.0.0! Minor breaking changes and necessary config adjustments can and will happen.
+[Upcoming changes](https://github.com/sl-nx/superlogin-next/projects/1) will mainly affect improved security (_including modified/ new configuration defaults_). Be sure to always check the [Changelog](https://github.com/sl-nx/superlogin/blob/master/CHANGELOG.md) before updating! Things may break and configs might need to be adjusted.
 
-The current status will become the 1.0 branch soon and be maintenance only. A new, more OWASP-compliant and [CloudFoundry](https://www.ibm.com/cloud/cloud-foundry)-ready version is developed in the `minimal` branch:
+The current released status `master` / `0.X` is maintenance only. 
+A new, more lightweigh, OWASP-compliant and [CloudFoundry](https://www.ibm.com/cloud/cloud-foundry)-ready version is developed in the `minimal` branch:
 
-- The adapters will no longer be used. The `session` route becomes deprecated.
-- db and doc ids will no longer include PII, but be UUIDs instead. Requires manual migration via replication.
-- `validate-x` routes and cloudant legacy auth become deprecated.
+- The adapters for session caching will no longer be used. The `session` route becomes deprecated.
+- db and doc ids no longer include PII, but be UUIDs instead. Requires manual migration via replication.
+- `validate-x` routes are deprecated.
 - signup with e-Mail only instead of `username` is preferred: now prevents account-guessing via forgotpass, login or signup
 - no more IP logging
-- `lockedUntil` and `activityLog` functionality has been removed
+- some functionality has been removed (Cloudant legacy auth, `lockedUntil`,...)
+
+When starting a new project or if you have migrated from Superlogin to the new DB format, it's the best idea to install the second latest commit instead of the published version, e.g.:
+
+```
+npm i github:sl-nx/superlogin-next#b6341032779619ed54fc13afea3b0347201314c6
+```
+
 
 Note that I'm no OAuth expert and only actively working on / performing security testing for the `local` email/PW authentication strategy.
 
@@ -309,39 +316,63 @@ Take a look at [`config.example.js`](https://github.com/sl-nx/superlogin-next/bl
 
 ##### `POST /register`
 
-Creates a new account with a username and password. Required fields are: `username`, `email`, `password` and `confirmPassword`. `name` is optional. Any additional fields you want to include need to be white listed under `userModel` in your config. See [`config.example.js`](https://github.com/sl-nx/superlogin-next/blob/master/config.example.js) for details.
+Creates a new account with a username and password. Required fields are: 
+`username`, `email`, `password` and `confirmPassword`. `name` is optional. 
+Any additional fields you want to include need to be white listed under 
+`userModel` in your config. See `src/config/default.config.ts`, 
+`config.example.js` or `src/types/config.d.ts` for details.
 
-If `local.sendConfirmEmail` is true, a confirmation email will be sent with a verify link. If `local.requireEmailConfirm` is true, the user will not be able to login until the confirmation is complete. If `security.loginOnRegistration` is true a session will be automatically created and sent as the response.
+If `local.sendConfirmEmail` is true (_recommended_), a confirmation email will 
+be sent with a verification link. If `local.requireEmailConfirm` is true, 
+(_recommended_) the user will not be able to login until the confirmation is 
+complete. If `security.loginOnRegistration` is true (_discouraged_), a session will 
+be automatically created and sent as the response.
 
 ##### `POST /login`
 
-Include `username` and `password` fields to authenticate and initiate a session. The field names can be customized in your config under `local.usernameField` and `local.passwordField`.
+Include `username` and `password` fields to authenticate and initiate a session. 
+The field names can be customized in your config under `local.usernameField` 
+and `local.passwordField`.
 
 ##### `GET /confirm-email/{token}`
 
-This link is included in the confirmation email, and will mark the user as confirmed. If `local.confirmEmailRedirectURL` is specified in your config, it will redirect to that location with `?success=true` if successful or `error={error}&message={msg}` if it failed. Otherwise it will generate a standard JSON response.
+This link is included in the confirmation email, and will mark the user as 
+confirmed. If `local.confirmEmailRedirectURL` is specified in your config, it 
+will redirect to that location with `?success=true` if successful or 
+`error={error}&message={msg}` if it failed. Otherwise it will generate a 
+standard JSON response.
 
 ##### `POST /refresh`
 
-Authentication token required. Extends the life of your current token and returns updated token information. The only field that will change is `expires`. Token life is configurable under `security.sessionLife` and is measured in seconds.
+Authentication token required. Extends the life of your current token and 
+returns updated token information. The only field that will change is `expires`.
+Token life is configurable under `security.sessionLife` and is measured in 
+seconds.
 
 ##### `POST /logout`
 
-Authentication required. Logs out the current session and deauthorizes the token on all user databases.
+Authentication required. Logs out the current session and deauthorizes the token
+on all user databases.
 
 ##### `POST /logout-others`
 
-Authentication required. Logs out and deauthorizes all user sessions except the current one.
+Authentication required. Logs out and deauthorizes all user sessions except the 
+current one.
 
 ##### `POST /logout-all`
 
-Authentication required. Logs out every session the user has open and deauthorizes the user completely on all databases.
+Authentication required. Logs out every session the user has open and 
+deauthorizes the user completely on all databases.
 
 ##### `POST /forgot-password`
 
-Include `email` field to send the forgot password email containing a password reset token. The life of the token can be set under `security.tokenLife` (in seconds).
+Include `email` field to send the forgot password email containing a password 
+reset token. The life of the token can be set under `security.tokenLife` (in 
+seconds).
 
-Have the email template redirect back to you're app where you're app presents U.I. to gather a new password and then `POST` to `/password-reset` with the forgot-password `token` and new password
+Have the email template redirect back to you're app where you're app presents 
+U.I. to gather a new password and then `POST` to `/password-reset` with the 
+forgot-password `token` and new password
 
 ##### `POST /password-reset`
 
@@ -353,9 +384,13 @@ Authentication required. Changes the user's password or creates one if it doesn'
 
 ##### `GET /validate-username/{username}`
 
+**Deprecated**
+
 Checks a username to make sure it is correctly formed and not already in use. Responds with status 200 if successful, or status 409 if unsuccessful.
 
 ##### `GET /validate-email/{email}`
+
+**Deprecated**
 
 Checks an email to make sure it is valid and not already in use. Responds with status 200 if successful, or status 409 if unsuccessful.
 
@@ -363,10 +398,21 @@ Checks an email to make sure it is valid and not already in use. Responds with s
 
 Authentication required. Changes the user's email. Required field: `newEmail`.
 
+Note: The server returns an answer once the email has been verified as valid and
+whether this email already exists in the DB, not waiting for the update of the 
+email to complete.
+
 ##### `GET /session`
+
+**Deprecated**. Attempt to access the (user's) CouchDB `/` instead.
 
 Returns information on the current session if it is valid. Otherwise you will get a 401 unauthorized response.
 
+##### `POST /request-deletion`
+
+Authentication required. A valid login (i.e. email, username or UUId) must be 
+provided as `username` and the current `password`.
+Removes the user's account and all its private databases.
 ##### `GET /{provider}`
 
 Open this in a popup window to initiate authentication with Facebook, Google, etc. After authentication, the callback will call a javascript function on the parent window called `superlogin.oauthSession` which takes 3 arguments: `error`, `session`, and `link`. `error` explains anything that went wrong. `session` includes the same session object that is generated by `/login`. `link` simply contains the name of the provider that was successfully linked.
@@ -391,12 +437,12 @@ This will link additional providers to an already authenticated user using the c
 
 ## Event Emitter
 
-SuperLogin also acts as an [event emitter](https://nodejs.org/api/events.html), which allows you to receive notifications when important things happen.
+SuperLogin also provides an [event emitter](https://nodejs.org/api/events.html), which allows you to receive notifications when important things happen.
 
 **Example:**
 
 ```js
-superlogin.on('login', function (userDoc, provider) {
+superlogin.emitter.on('login', function (userDoc, provider) {
   console.log('User: ' + userDoc._id + ' logged in with ' + provider);
 });
 ```
@@ -417,6 +463,7 @@ Here is a full list of the events that SuperLogin emits, and parameters provided
 - `illegal-email-change`: (`login`, `newEmail`)
 - `user-db-added`: (`dbName`)
 - `user-db-removed`: (`dbName`)
+- `user-deleted`: (`userDoc`, `reason`)
 - `logout`: (`user_id`)
 - `logout-all`: (`user_id`)
 

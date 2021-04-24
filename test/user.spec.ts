@@ -1,20 +1,25 @@
-import { addProvidersToDesignDoc, getDBURL, hyphenizeUUID } from '../src/util';
 import chai, { expect } from 'chai';
-import { CouchDbAuthDoc, DocumentScope, SlUserDoc } from '../src/types/typings';
-import { validate as isUUID, v4 as uuidv4 } from 'uuid';
-import { ConfigHelper as Configure } from '../src/config/configure';
 import events from 'events';
-import { Mailer } from '../src/mailer';
 import nano from 'nano';
 import path from 'path';
-import request from 'superagent';
-import seed from '../src/design/seed';
 import sinon from 'sinon';
+import request from 'superagent';
+import { v4 as uuidv4, validate as isUUID } from 'uuid';
+import { ConfigHelper as Configure } from '../src/config/configure';
+import seed from '../src/design/seed';
+import { Mailer } from '../src/mailer';
+import { CouchDbAuthDoc, DocumentScope, SlUserDoc } from '../src/types/typings';
 import { User } from '../src/user';
+import {
+  addProvidersToDesignDoc,
+  getDBURL,
+  hyphenizeUUID,
+  timeoutPromise
+} from '../src/util';
+import { config } from './test.config';
 chai.use(require('sinon-chai'));
 
-const config = require('./test.config.js');
-const dbUrl = getDBURL(config.dbServer);
+const dbUrl = getDBURL(config.dbServer as any);
 const couch = nano({ url: dbUrl, parseUrl: false });
 
 const emitter = new events.EventEmitter();
@@ -37,6 +42,9 @@ let superuserUUID;
 let testUserUUID;
 let misterxUUID;
 let misterxKey;
+let resetToken;
+let resetTokenHashed;
+let spySendMail;
 
 const emailUserForm = {
   name: 'Awesome',
@@ -52,6 +60,7 @@ const userConfigHelper = new Configure({
   security: {
     defaultRoles: ['user'],
     disabledRoutes: [],
+    userActivityLogSize: 3,
     iterations: [
       [0, 10],
       [1596797642, 10000]
@@ -109,8 +118,7 @@ const userConfigHelper = new Configure({
     },
     model: {
       _default: {
-        designDocs: ['test'],
-        permissions: ['_reader', '_writer', '_replicator']
+        designDocs: ['test']
       }
     },
     defaultDBs: {
@@ -209,7 +217,9 @@ describe('User Model', async function () {
         return user.createUser(testUserForm, req);
       })
       .then(newUser => {
-        console.log('User created');
+        return timeoutPromise(500).then(() => newUser);
+      })
+      .then(newUser => {
         superuserUUID = newUser._id;
         createdDBs.push('test_usertest$' + superuserUUID);
         return userDB.get(superuserUUID);
@@ -224,6 +234,7 @@ describe('User Model', async function () {
         expect(newUser.local.created >= now).to.be.true;
         expect(newUser.modelTest).to.equal(true);
         expect(newUser.roles[0]).to.equal('user');
+        expect(newUser.activity[0].action).to.equal('signup');
         expect(newUser.onCreate1).to.equal(true);
         expect(newUser.onCreate2).to.equal(true);
         expect(newUser.age).to.equal('32');
@@ -291,6 +302,32 @@ describe('User Model', async function () {
       });
   });
 
+  it('should emit and send and email if trying to register again', () => {
+    spySendMail = sinon.spy(mailer, 'sendEmail');
+    const emitterPromise = new Promise<void>(resolve => {
+      emitter.once('signup-attempt', () => {
+        console.log('emitter: got attempt.');
+        resolve();
+      });
+    });
+
+    return previous
+      .then(() => {
+        userConfig.local.requireEmailConfirm = true;
+        userConfig.local.emailUsername = true;
+        const formWithoutUsername = { ...testUserForm };
+        delete formWithoutUsername.username;
+        return Promise.all([user.createUser(testUserForm), emitterPromise]);
+      })
+      .then(res => {
+        userConfig.local.requireEmailConfirm = false;
+        userConfig.local.emailUsername = false;
+        expect(res[0]).to.equal(undefined);
+        expect(spySendMail.callCount).to.equal(1);
+        return Promise.resolve();
+      });
+  });
+
   let sessionKey, sessionPass, firstExpires;
 
   it('should generate a new session for the user', function () {
@@ -323,6 +360,7 @@ describe('User Model', async function () {
         return userDB.get(superuserUUID);
       })
       .then(function (user) {
+        expect(user.activity[0].action).to.equal('login');
         return emitterPromise;
       });
   });
@@ -442,7 +480,7 @@ describe('User Model', async function () {
       .then(function (session2) {
         sessions[1] = session2.token;
         passes[1] = session2.password;
-        return user.logoutUser(null, sessions[0]);
+        return user.logoutAll(null, sessions[0]);
       })
       .then(function () {
         return Promise.all([
@@ -488,41 +526,39 @@ describe('User Model', async function () {
       })
       .then(function (verifiedUser) {
         expect(verifiedUser.email).to.equal(testUserForm.email);
+        expect(verifiedUser.activity[0].action).to.equal('email-verified');
         return emitterPromise;
       });
   });
 
-  let resetToken;
-  let resetTokenHashed;
-  let spySendMail;
-
   it('should generate a password reset token', function () {
-    const emitterPromise = new Promise<void>(function (resolve) {
+    const emitterPromise = new Promise<any>(function (resolve) {
       emitter.once('forgot-password', function (user) {
         expect(user.key).to.equal('superuser');
-        resolve();
+        resolve(user);
       });
     });
 
-    spySendMail = sinon.spy(mailer, 'sendEmail');
-
     return previous
-      .then(function () {
-        console.log('Generating password reset token');
-        return user.forgotPassword(testUserForm.email, req);
-      })
-      .then(function () {
-        return userDB.get(superuserUUID);
-      })
-      .then(function (result) {
+      .then(() =>
+        Promise.all([
+          user
+            .forgotPassword(testUserForm.email, req)
+            .then(() => userDB.get(superuserUUID)),
+          emitterPromise
+        ])
+      )
+      .then(results => {
+        const result = results[1];
+        expect(results[0]._id).to.equal(results[1]._id);
         resetTokenHashed = result.forgotPassword.token; // hashed token stored in db
 
         expect(result.forgotPassword.token).to.be.a('string');
         expect(result.forgotPassword.expires).to.be.above(Date.now());
+        expect(result.activity[0].action).to.equal('forgot-password');
 
-        expect(spySendMail.callCount).to.equal(1);
-
-        const args = spySendMail.getCall(0).args;
+        expect(spySendMail.callCount).to.equal(2);
+        const args = spySendMail.getCall(1).args;
         expect(args[0]).to.equal('forgotPassword');
         expect(args[1]).to.equal(testUserForm.email);
         console.log('got args user._id');
@@ -531,7 +567,6 @@ describe('User Model', async function () {
 
         resetToken = args[2].token; // keep unhashed token emailed to user.
         expect(resetTokenHashed).to.not.equal(resetToken);
-        return emitterPromise;
       });
   });
 
@@ -591,9 +626,10 @@ describe('User Model', async function () {
       .then(function (userAfterReset) {
         // It should delete the password reset token completely
         expect(userAfterReset.forgotPassword).to.be.undefined;
+        expect(userAfterReset.activity[0].action).to.equal('password-reset');
 
-        expect(spySendMail.callCount).to.equal(2);
-        const args = spySendMail.getCall(1).args;
+        expect(spySendMail.callCount).to.equal(3);
+        const args = spySendMail.getCall(2).args;
         expect(args[0]).to.equal('modifiedPassword');
         expect(args[1]).to.equal(testUserForm.email);
         expect(args[2].user._id).to.equal(superuserUUID);
@@ -628,8 +664,10 @@ describe('User Model', async function () {
         return userDB.get(superuserUUID);
       })
       .then(function (userAfterChange) {
-        expect(spySendMail.callCount).to.equal(3);
-        const args = spySendMail.getCall(2).args;
+        expect(userAfterChange.activity[0].action).to.equal('password-change');
+
+        expect(spySendMail.callCount).to.equal(4);
+        const args = spySendMail.getCall(3).args;
         expect(args[0]).to.equal('modifiedPassword');
         expect(args[1]).to.equal(testUserForm.email);
         expect(args[2].user.key).to.equal(testUserForm.username);
@@ -643,15 +681,15 @@ describe('User Model', async function () {
   });
 
   it('should change the email', function () {
-    const emitterPromise = new Promise<void>(function (resolve) {
-      emitter.once('email-changed', function (user) {
+    const emitterPromise = new Promise<any>(resolve => {
+      emitter.once('email-changed', user => {
         expect(user.key).to.equal('superuser');
-        resolve();
+        resolve(user);
       });
     });
 
     return previous
-      .then(function () {
+      .then(() => {
         console.log('Changing the email');
         return user.changeEmail(
           testUserForm.username,
@@ -659,14 +697,14 @@ describe('User Model', async function () {
           req
         );
       })
-      .then(function () {
-        return userDB.get(superuserUUID);
-      })
-      .then(function (userAfterChange) {
+      .then(() => emitterPromise)
+      .then(() => userDB.get(superuserUUID))
+      .then(userAfterChange => {
+        expect(userAfterChange.activity[0].action).to.equal('email-changed');
         expect(userAfterChange.unverifiedEmail.email).to.equal(
           'superuser2@example.com'
         );
-        return emitterPromise;
+        return Promise.resolve();
       });
   });
 
@@ -688,7 +726,7 @@ describe('User Model', async function () {
     return previous
       .then(() => {
         console.log('Authenticating new facebook user');
-        return user.socialAuth('facebook', auth, profile);
+        return user.createUserSocial('facebook', auth, profile);
       })
       .then(newUser => {
         misterxUUID = newUser._id;
@@ -700,6 +738,9 @@ describe('User Model', async function () {
         expect(result.email).to.equal('misterx@example.com');
         expect(result.providers[0]).to.equal('facebook');
         expect(result.facebook.profile.username).to.equal('misterx');
+        expect(result.activity[0].action).to.equal('signup');
+        expect(result.activity[0].provider).to.equal('facebook');
+
         misterxKey = result.key;
         return emitterPromise;
       });
@@ -716,7 +757,7 @@ describe('User Model', async function () {
     return previous
       .then(function () {
         console.log('Authenticating existing facebook user');
-        return user.socialAuth('facebook', auth, profile);
+        return user.createUserSocial('facebook', auth, profile);
       })
       .then(function () {
         return userDB.get(misterxUUID);
@@ -737,7 +778,7 @@ describe('User Model', async function () {
     return previous
       .then(function () {
         console.log('Making sure an existing email is rejected');
-        return user.socialAuth('facebook', auth, profile);
+        return user.createUserSocial('facebook', auth, profile);
       })
       .then(
         function () {
@@ -788,10 +829,14 @@ describe('User Model', async function () {
     return previous
       .then(function () {
         console.log('Linking social profile to existing user');
-        return user.linkSocial('superuser', 'facebook', auth, profile);
+        return user.linkUserSocial('superuser', 'facebook', auth, profile);
       })
       .then(function (theUser) {
         expect(theUser.facebook.profile.username).to.equal('superuser');
+        expect(theUser.activity[0].action).to.equal('link-social');
+        expect(theUser.activity[0].provider).to.equal('facebook');
+        // Test that the activity list is limited to the maximum value
+        expect(theUser.activity.length).to.equal(3);
       });
   });
 
@@ -934,7 +979,7 @@ describe('User Model', async function () {
 
   it('should create a new user in userEmail mode', function () {
     return previous
-      .then(function () {
+      .then(() => {
         userConfig.local.emailUsername = true;
         // Don't create any more userDBs
         delete userConfig.userDBs.defaultDBs;
@@ -942,9 +987,10 @@ describe('User Model', async function () {
         user = new User(userConfig, userDB, keysDB, mailer, emitter);
         return user.createUser(emailUserForm, req);
       })
-      .then(function (newUser) {
+      .then(newUser => {
         expect(newUser.unverifiedEmail.email).to.equal(emailUserForm.email);
         expect(newUser.key).to.exist;
+        return timeoutPromise(500);
       });
   });
 
@@ -954,7 +1000,7 @@ describe('User Model', async function () {
         return user.createUser(emailUserForm, req);
       })
       .then(
-        function (newUser) {
+        function () {
           throw 'Should not have created the user!';
         },
         function (err) {

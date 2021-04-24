@@ -1,15 +1,15 @@
 'use strict';
-import { CouchDbAuthDoc, DocumentScope, SlUserDoc } from '../src/types/typings';
-import { ConfigHelper } from '../src/config/configure';
-import { DBAuth } from '../src/dbauth';
 import { expect } from 'chai';
-import { getDBURL } from '../src/util';
 import nano from 'nano';
 import request from 'superagent';
+import { ConfigHelper } from '../src/config/configure';
+import { DBAuth } from '../src/dbauth';
 import seed from '../src/design/seed';
+import { CouchDbAuthDoc, DocumentScope, SlUserDoc } from '../src/types/typings';
+import { getDBURL } from '../src/util';
+import { config } from './test.config';
 
-const config = require('./test.config.js');
-const dbUrl = getDBURL(config.dbServer);
+const dbUrl = getDBURL(config.dbServer as any);
 const couch = nano({ url: dbUrl, parseUrl: false });
 
 couch.db.create('cane_test_users');
@@ -107,7 +107,7 @@ describe('DBAuth', () => {
   it('should authorize database keys', function () {
     return previous
       .then(function () {
-        return dbAuth.authorizeKeys('testuser', testDB, ['key1', 'key2']);
+        return dbAuth.authorizeKeys(testDB, ['key1', 'key2']);
       })
       .then(function () {
         return testDB.get('_security');
@@ -121,7 +121,7 @@ describe('DBAuth', () => {
   it('should only authorize keys once', function () {
     return previous
       .then(function () {
-        return dbAuth.authorizeKeys('testuser', testDB, ['key1', 'key2']);
+        return dbAuth.authorizeKeys(testDB, ['key1', 'key2']);
       })
       .then(function () {
         return testDB.get('_security');
@@ -161,7 +161,6 @@ describe('DBAuth', () => {
           'personal',
           ['test'],
           'private',
-          [],
           ['admin_role'],
           ['member_role']
         );

@@ -1,9 +1,10 @@
 import chai, { expect } from 'chai';
-import { getDBURL } from '../lib/util';
 import nano from 'nano';
+import sinon from 'sinon';
 import request from 'superagent';
 import seed from '../lib/design/seed';
-import sinon from 'sinon';
+import { getDBURL, timeoutPromise } from '../lib/util';
+import { config } from './test.config';
 chai.use(require('sinon-chai'));
 
 describe('SuperLogin', function () {
@@ -18,7 +19,6 @@ describe('SuperLogin', function () {
   let expireCompare;
   let resetToken = null;
 
-  const config = require('./test.config');
   const server = 'http://localhost:5000';
   const dbUrl = getDBURL(config.dbServer);
   const couch = nano({ url: dbUrl, parseUrl: false });
@@ -27,8 +27,8 @@ describe('SuperLogin', function () {
     name: 'Kewl Uzer',
     username: 'kewluzer',
     email: 'kewluzer@example.com',
-    password: '1s3cret',
-    confirmPassword: '1s3cret'
+    password: '123s3cret',
+    confirmPassword: '123s3cret'
   };
   const invalidNewUser = { ...newUser, email: 'blah@example' };
 
@@ -44,9 +44,10 @@ describe('SuperLogin', function () {
     name: 'Kewler Uzer',
     username: 'kewleruzer',
     email: 'kewleruzer@example.com',
-    password: '1s3cret',
-    confirmPassword: '1s3cret'
+    password: '123s3cret',
+    confirmPassword: '123s3cret'
   };
+  let newUser2Bearer;
 
   const findUser = key =>
     userDB
@@ -86,7 +87,6 @@ describe('SuperLogin', function () {
   });
 
   it('should reject a new user with an invalid email', () => {
-    console.log('setup ok');
     return previous.then(() => {
       return request
         .post(server + '/auth/register')
@@ -101,8 +101,39 @@ describe('SuperLogin', function () {
     });
   });
 
+  it('should reject a new user without matching passwords', () => {
+    return previous.then(() => {
+      return request
+        .post(server + '/auth/register')
+        .send({ ...newUser, confirmPassword: 'something else' })
+        .then(() => {
+          return Promise.reject(
+            'different confirmPassword should have been rejected'
+          );
+        })
+        .catch(err => {
+          expect(err.status).to.equal(400);
+          console.log('Rejected user with different confirmPassword');
+        });
+    });
+  });
+
+  it('should reject a new user with a too short password', () => {
+    return previous.then(() => {
+      return request
+        .post(server + '/auth/register')
+        .send({ ...newUser, password: 'abc', confirmPassword: 'abc' })
+        .then(() => {
+          return Promise.reject('too short password should have been rejected');
+        })
+        .catch(err => {
+          expect(err.status).to.equal(400);
+          console.log('Rejected user with too short password');
+        });
+    });
+  });
+
   it('should reject a new user without any data', () => {
-    console.log('setup ok');
     return previous.then(() => {
       return request
         .post(server + '/auth/register')
@@ -131,7 +162,7 @@ describe('SuperLogin', function () {
           expect(res.status).to.equal(200);
           expect(res.body.success).to.equal('Request processed.');
           console.log('User created');
-          return Promise.resolve();
+          return timeoutPromise(500);
         });
     });
   });
@@ -224,20 +255,24 @@ describe('SuperLogin', function () {
 
   it('should generate a forgot password token', function () {
     const spySendMail = sinon.spy(app.superlogin.mailer, 'sendEmail');
+    const emitterPromise = new Promise<void>(resolve => {
+      app.superlogin.emitter.on('forgot-password', () => {
+        resolve();
+      });
+    });
 
-    return previous.then(function () {
-      return new Promise<void>(function (resolve, reject) {
+    return previous.then(() => {
+      return Promise.all([
         request
           .post(server + '/auth/forgot-password')
-          .send({ email: newUser.email })
-          .then(res => {
-            expect(res.status).to.equal(200);
-            // keep unhashed token emailed to user.
-            const sendEmailArgs = spySendMail.getCall(0).args;
-            resetToken = sendEmailArgs[2].token;
-            console.log('Password token successfully generated.');
-            resolve();
-          });
+          .send({ email: newUser.email }),
+        emitterPromise
+      ]).then(res => {
+        expect(res[0].status).to.equal(200);
+        const sendEmailArgs = spySendMail.getCall(0).args;
+        resetToken = sendEmailArgs[2].token;
+        console.log('Password token successfully generated.');
+        return Promise.resolve();
       });
     });
   });
@@ -250,8 +285,8 @@ describe('SuperLogin', function () {
             .post(server + '/auth/password-reset')
             .send({
               token: resetToken,
-              password: 'newpass',
-              confirmPassword: 'newpass'
+              password: 'newpass1',
+              confirmPassword: 'newpass1'
             })
             .then(res => {
               expect(res.status).to.equal(200);
@@ -288,7 +323,7 @@ describe('SuperLogin', function () {
       return new Promise<void>(function (resolve, reject) {
         request
           .post(server + '/auth/login')
-          .send({ username: newUser.username, password: 'newpass' })
+          .send({ username: newUser.username, password: 'newpass1' })
           .then(res => {
             accessToken = res.body.token;
             accessPass = res.body.password;
@@ -334,7 +369,7 @@ describe('SuperLogin', function () {
             .post(server + '/auth/password-change')
             .set('Authorization', 'Bearer ' + accessToken + ':' + accessPass)
             .send({
-              currentPassword: 'newpass',
+              currentPassword: 'newpass1',
               newPassword: 'newpass2',
               confirmPassword: 'newpass2'
             })
@@ -387,6 +422,7 @@ describe('SuperLogin', function () {
             expect(res.status).to.equal(200);
             expect(res.body.token).to.be.string;
             console.log('User created and logged in');
+            newUser2Bearer = res.body.token + ':' + res.body.password;
             resolve();
           });
       });
@@ -466,7 +502,7 @@ describe('SuperLogin', function () {
     });
   }
 
-  it('should respond unauthorized if a user logs in and no password is set', function () {
+  it('should respond unauthorized on login if no password is set', function () {
     return previous
       .then(function () {
         return userDB.insert({
@@ -483,7 +519,7 @@ describe('SuperLogin', function () {
       });
   });
 
-  it('should respond unauthorized if the password is wrong', function () {
+  it('should respond unauthorized on login if the password is wrong', function () {
     return previous
       .then(function () {
         return attemptLogin('kewluzer', 'wrong');
@@ -493,5 +529,46 @@ describe('SuperLogin', function () {
         expect(result.message).to.equal('Invalid username or password');
         return Promise.resolve();
       });
+  });
+
+  it('should respond unauthorized on login if data is missing', function () {
+    return previous
+      .then(function () {
+        return attemptLogin(undefined, 'test');
+      })
+      .then(function (result: any) {
+        expect(result.status).to.equal(401);
+        expect(result.message).to.equal('Missing credentials');
+        return Promise.resolve();
+      });
+  });
+
+  it('should delete a user', () => {
+    const emitterPromise = new Promise<void>(function (resolve) {
+      app.superlogin.emitter.on('user-deleted', function (user, reason) {
+        expect(user.key).to.equal(newUser2.username);
+        expect(reason).to.equal('boring');
+        resolve();
+      });
+    });
+
+    return previous.then(() => {
+      const deletionForm = {
+        password: newUser2.password,
+        username: newUser2.username,
+        reason: 'boring'
+      };
+      const requestPromise = new Promise<void>(resolve => {
+        request
+          .post(server + '/auth/request-deletion')
+          .set('Authorization', 'Bearer ' + newUser2Bearer)
+          .send(deletionForm)
+          .end(function (error, res) {
+            expect(res.status).to.equal(200);
+            resolve();
+          });
+      });
+      return Promise.all([requestPromise, emitterPromise]);
+    });
   });
 });

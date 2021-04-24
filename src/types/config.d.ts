@@ -1,5 +1,5 @@
 import { Sofa } from '@sl-nx/sofa-model';
-import Mail from 'nodemailer/lib/mailer';
+import Mail, { Address } from 'nodemailer/lib/mailer';
 
 export interface TestConfig {
   /** Use a stub transport so no email is actually sent. Default: false */
@@ -24,7 +24,15 @@ export interface SecurityConfig {
   sessionLife: number;
   // The amount of time a password reset token is valid for
   tokenLife: number;
-  /** If `true`, the user will be logged in automatically after registering. Default: `false` */
+  /** The maximum number of entries in the activity log in each user doc.
+   * Use 0 or undefined to disable completely
+   */
+  userActivityLogSize?: number;
+  /**
+   * If `true`, the user will be logged in automatically after registering.
+   * Default: `false`. Note that setting this to `true` will make your app
+   * vulnerable to name guessing via the registration route.
+   */
   loginOnRegistration: boolean;
   /** If `true`, the user will be logged in automatically after resetting the
    * password. default: `false` */
@@ -35,9 +43,9 @@ export interface SecurityConfig {
    * number of iterations for pbkdf2 password hashing, starting with the
    * supplied dates. The first entry is the timestamp, the second number the
    * number of iterations that should be used from this timestamp until the
-   * next timestamp in the array. Default: `undefined`
+   * next timestamp in the array. Default: `undefined` uses only 10 iterations.
    */
-  iterations?: number[][];
+  iterations?: [number, number][];
 }
 
 export interface LengthConstraint {
@@ -52,35 +60,37 @@ export interface PasswordConstraints {
 
 export interface LocalConfig {
   /**
-   * Send out a confirmation email after each user signs up with local login. Defaul: `true`
+   * Send out a confirmation email after each user signs up with local login.
+   * Default: `true`. Must be `true` if `requireEmailConfirm` is `true`.
    */
   sendConfirmEmail: boolean;
   /**
    * Also require the email be confirmed before the user can change his email.
    * changed email is updated. Default: `true`. If set, both `change-email` and
    * `signup` requests will return the same generic answer also if the email is
-   * already taken.
+   * already taken. If `false`, `change-email` is vulnerable to name guessing.
    */
   requireEmailConfirm: boolean;
   /**
    * Requires the correct `password` to be sent in the body in order to change
-   * the email. */
+   * the email. Default: `true` */
   requirePasswordOnEmailChange: boolean;
   /**
-   * send a confirmation E-Mail to the user after the password has
-   * successfully been changed or resetted. */
+   * Sends a confirmation E-Mail to the user after the password has
+   * succesfully been changed or resetted. Default: `true`.
+   */
   sendPasswordChangedEmail: boolean;
   /** If this is set, the user will be redirected to this location after confirming email instead of JSON response */
   confirmEmailRedirectURL?: string;
-  /** allow to also login with the username. Default: false */
+  /** allow to also login with the username. Default: `false` */
   usernameLogin: boolean;
-  /** allow to also login with the UUID. Default: false */
+  /** allow to also login with the UUID. Default: `false` */
   uuidLogin: boolean;
-  /** allow to login via E-Mail. Default: true */
+  /** allow to login via E-Mail. Default: `true` */
   emailLogin: boolean;
   /**
    * only require email for signup and use a randomly generated `key` for the
-   * username for compatibility reasons. Default: true
+   * username for compatibility reasons. Default: `true`
    * If `false`, the `signup`-route will be vulnerable to name guessing, so you
    * should only disable this option if your usernames are public anyways.
    */
@@ -89,17 +99,19 @@ export interface LocalConfig {
   sendNameAndUUID?: boolean;
   /** If a number > 0 is set here, the token for password reset will be shortened */
   tokenLengthOnReset?: number;
-  // Custom names for the username and password fields in your sign-in form
+  /** Custom username field in your login form. Default: `'username'`. */
   usernameField?: string;
+  /** Custom passwort field in your login form. Default: `'password'`. */
   passwordField?: string;
   /**
-   * override default constraints (processed by sofa-model).
+   * Override default constraints (which are: must match `confirmPassword`, at least length 8).
+   * The constraints are processed by [validatejs](https://validatejs.org/#validate).
    */
-  passwordConstraints?: PasswordConstraints;
+  passwordConstraints?: Record<string, any>;
 }
 
+/** Configure the CouchDB compatible server where all your databases are stored on */
 export interface DBServerConfig {
-  // The CouchDB compatible server where all your databases are stored on
   protocol: 'https://' | 'http://';
   host: string;
   user?: string;
@@ -108,12 +120,10 @@ export interface DBServerConfig {
   // This will be the access URL for all your user's personalDBs
   publicURL?: string;
   /**
-   * Set this to `true` if you are using Cloudant with API-v2-keys and Cloudant's role system.
-   * Provide `CLOUDANT_USER` and - unless you're using IAM for authentication - `CLOUDANT_PASS` as environment variables
-   */
-  cloudant?: boolean;
-  /** Use this flag instead if you use Cloudant, but with the
-   *  `_users` - DB and CouchDB's permission system instead */
+   * Uses the CouchDB-compatible `_users` - DB and permission system. See
+   * [Cloudant Docs](https://cloud.ibm.com/docs/Cloudant?topic=Cloudant-work-with-your-account#using-the-_users-database-with-cloudant-nosql-db)
+   * for more details.
+   * */
   couchAuthOnCloudant?: boolean;
   /**
    * If specified together with `cloudant` or `couchAuthOnCloudant`, this IAM api key will be used for authentication
@@ -121,13 +131,14 @@ export interface DBServerConfig {
    */
   iamApiKey?: string;
   /**
-   * The name for the database that stores all your user information.
-   * This is distinct from CouchDB's _user database. Default: 'sl-users'.
-   * Alternatively you can pass in a `nano` instance to the SuperLogin constructor and leave this blank */
+   * The name for the database that stores user information like email, hashed passwords, sessions,...
+   * This is _distinct_ from CouchDB's _user database. Default: `'sl-users'`.
+   * Alternatively, you can pass in a `nano` instance to the SuperLogin constructor and leave this blank */
   userDB?: string;
-  /** defaults to CouchDB's _users database. Each session generates the user a unique login and password.
-   * This is not used when `cloudant` is true, but can be used with
-   * `couchStyleAuth` on Cloudant as well. */
+  /**
+   * defaults to CouchDB's _users database. Each session generates the user a unique login and password
+   * according to the [CouchDB Users Documents format](https://docs.couchdb.org/en/stable/intro/security.html#users-documents).
+   */
   couchAuthDB?: string;
   /** Directory for the DDocs of user-DBs, as specified by `userDB.designDocs` */
   designDocDir?: string;
@@ -155,7 +166,7 @@ export interface MailOptions {
 
 export interface MailerConfig {
   /** Email address that all your system emails will be from */
-  fromEmail: string;
+  fromEmail: string | Address;
   /** Use this if you want to specify a custom Nodemailer transport. Defaults to SMTP or sendmail. */
   transport?: any;
   /**
@@ -195,13 +206,13 @@ export interface SecurityRoles {
   members: string[];
 }
 
+export type PersonalDBType = 'private' | 'shared';
+
 export interface PersonalDBSettings {
   /** Array containing name of the design doc files (omitting .js extension), in the directory specified in `designDocDir` */
   designDocs: string[];
-  /** these permissions only work with the Cloudant API */
-  permissions: string[];
   /** defaults to 'private' */
-  type?: 'private' | 'shared';
+  type?: PersonalDBType;
   /** admin roles that will be automatically added to the db's _security object of this specific db. Default: [] */
   adminRoles?: string[];
   /** member roles that will be automatically added to the db's _security object of this specific db. Default: [] */
