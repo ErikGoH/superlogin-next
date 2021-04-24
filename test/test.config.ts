@@ -1,4 +1,4 @@
-module.exports = {
+export const config = {
   port: 5000,
   testMode: {
     noEmail: true,
@@ -6,15 +6,18 @@ module.exports = {
     oauthDebug: true
   },
   dbServer: {
-    protocol: process.env.COUCH_PROTOCOL || 'http://',
+    protocol: (process.env.COUCH_PROTOCOL || 'http://') as
+      | 'http://'
+      | 'https://',
     host: process.env.COUCH_HOST || 'localhost:5984',
-    user: process.env.COUCH_USER || '',
-    password: process.env.COUCH_PASS || '',
+    user: process.env.COUCH_USER || 'admin',
+    password: process.env.COUCH_PASS || 'password',
     userDB: 'sl_test-users',
     couchAuthDB: 'sl_test-keys'
   },
   security: {
-    disabledRoutes: []
+    disabledRoutes: [],
+    userActivityLogSize: 10
   },
   local: {
     sendConfirmEmail: true,

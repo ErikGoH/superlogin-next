@@ -1,3 +1,11 @@
+import { validate as isUUID } from 'uuid';
+import { Config } from '../types/config';
+import {
+  DocumentScope,
+  SlUserDoc,
+  UserAction,
+  UserActivity
+} from '../types/typings';
 import {
   capitalizeFirstLetter,
   EMAIL_REGEXP,
@@ -6,10 +14,6 @@ import {
   removeHyphens,
   USER_REGEXP
 } from '../util';
-import { Config } from '../types/config';
-import { DocumentScope } from '../types/typings';
-import { validate as isUUID } from 'uuid';
-import { SlUserDoc } from '../types/typings';
 
 export class DbManager {
   constructor(
@@ -94,9 +98,37 @@ export class DbManager {
     return results.docs.length === 0;
   }
 
-  getMatchingIdentifier(login: string): '_id' | 'email' | 'key' {
+  /** adds a log entry for the `action` and returns the modified `userDoc` */
+  logActivity(
+    action: UserAction,
+    provider: string,
+    userDoc: SlUserDoc
+  ): SlUserDoc {
+    const logSize = this.config.security?.userActivityLogSize;
+    if (!logSize) {
+      return userDoc;
+    }
+    if (!userDoc.activity || !(userDoc.activity instanceof Array)) {
+      userDoc.activity = [];
+    }
+    const entry: UserActivity = {
+      timestamp: new Date().toISOString(),
+      action: action,
+      provider: provider
+    };
+    userDoc.activity.unshift(entry);
+    while (userDoc.activity.length > logSize) {
+      userDoc.activity.pop();
+    }
+    return userDoc;
+  }
+
+  getMatchingIdentifier(
+    login: string,
+    allowUUID = false
+  ): '_id' | 'email' | 'key' {
     if (
-      this.config.local.uuidLogin &&
+      (allowUUID || this.config.local.uuidLogin) &&
       [32, 36].includes(login.length) &&
       !login.includes('@')
     ) {
@@ -112,8 +144,8 @@ export class DbManager {
     return undefined;
   }
 
-  getUser(login: string): Promise<SlUserDoc | null> {
-    const identifier = this.getMatchingIdentifier(login);
+  getUser(login: string, allowUUId = false): Promise<SlUserDoc | null> {
+    const identifier = this.getMatchingIdentifier(login, allowUUId);
     if (!identifier) {
       console.log('no matching identifier for login: ', login);
       return Promise.reject({ error: 'Bad request', status: 400 });
