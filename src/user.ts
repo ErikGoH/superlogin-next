@@ -1167,7 +1167,8 @@ export class User {
           dbConfig.designDocs,
           dbConfig.type,
           dbConfig.adminRoles,
-          dbConfig.memberRoles
+          dbConfig.memberRoles,
+          dbConfig.appendSeparator
         );
       })
       .then(finalDBName => {
@@ -1202,12 +1203,14 @@ export class User {
               dbConfig.designDocs,
               type,
               dbConfig.adminRoles,
-              dbConfig.memberRoles
+              dbConfig.memberRoles,
+              dbConfig.appendSeparator
             )
             .then(finalDBName => {
               delete dbConfig.adminRoles;
               delete dbConfig.memberRoles;
               delete dbConfig.designDocs;
+              delete dbConfig.appendSeparator;
               dbConfig.type = type;
               newUser.personalDBs[finalDBName] = dbConfig;
             })

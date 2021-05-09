@@ -156,7 +156,8 @@ const exampleConfig = {
       // If your database is not listed below, these default settings will be applied
       _default: {
         // Array containing name of the design doc files (omitting .js extension), in the directory configured below
-        designDocs: ['mydesign']
+        designDocs: ['mydesign'],
+        appendSeparator: '$'
       },
       test: {
         designDocs: ['test'],

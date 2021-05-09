@@ -95,3 +95,5 @@ export class SuperLogin extends User {
     this.requireAllRoles = middleware.requireAllRoles.bind(middleware);
   }
 }
+
+export default SuperLogin;

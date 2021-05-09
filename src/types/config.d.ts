@@ -217,6 +217,8 @@ export interface PersonalDBSettings {
   adminRoles?: string[];
   /** member roles that will be automatically added to the db's _security object of this specific db. Default: [] */
   memberRoles?: string[];
+  /** when the type is private the database name gets appended with this string and the user_id. Default: '$' */
+  appendSeparator?: string;
 }
 
 export interface PersonalDBModel {
