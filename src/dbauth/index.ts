@@ -100,7 +100,7 @@ export class DBAuth {
     type?: string,
     adminRoles?: string[],
     memberRoles?: string[],
-    appendSeparator?: string,
+    appendSeparator = '$', 
   ): Promise<string> {
     const promises = [];
     adminRoles = adminRoles || [];
